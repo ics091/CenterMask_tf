@@ -126,24 +126,82 @@ def vovnet_graph(input_image, architecture, config):
     aggr = []
     # stage (i + 2)
     for i in range(4):
-        x = _OSA_stage(x, config_stage_ch[i], config_concat_ch[i], block_per_stage[i], layer_per_block, i + 2, SE)
+        x = _OSA_stage(x, config_stage_ch[i], config_concat_ch[i],
+                       block_per_stage[i], layer_per_block, i + 2, SE)
         print(x.shape)
         aggr.append(x)
     return aggr
 
 
+def fpn(feature_maps, config, fpn_out_channel=256, top_blocks=None):
+
+    # feature_maps => list[Tensor]
+
+    out_channels = fpn_out_channel
+
+    # feature pyramid layer
+    _, C3, C4, C5 = feature_maps
+    P5 = KL.Conv2D(out_channels, kernel_size=(1, 1))(C5)
+    P4 = KL.Add(name="fpn_p4add")([
+        KL.UpSampling2D(size=(2, 2))(P5),
+        KL.Conv2D(out_channels, kernel_size=(1, 1))(C4)
+    ])
+    P3 = KL.Add(name="fpn_p3add")([
+        KL.UpSampling2D(size=(2, 2))(P4),
+        KL.Conv2D(out_channels, kernel_size=(1, 1))(C3)
+    ])
+
+    P3 = KL.Conv2D(out_channels, (3, 3), padding="SAME")(P3)
+    P4 = KL.Conv2D(out_channels, (3, 3), padding="SAME")(P4)
+    P5 = KL.Conv2D(out_channels, (3, 3), padding="SAME")(P5)
+
+    P6 = KL.MaxPooling2D(pool_size=(1, 1), strides=2)(P5)
+    P7 = KL.MaxPooling2D(pool_size=(1, 1), strides=2)(P6)
+
+    fpn_maps = [P3, P4, P5, P6, P7]
+
+    return fpn_maps
+
+
+# FCOS
+def FCOSHead(input_feature_maps, config):
+    x = input_feature_maps
+    num_classes = config.FCOS.NUM_CLASS - 1
+    conv_num = config.FCOS.CONV_NUM
+
+    logits = []
+    bbox_reg = []
+    centerness = []
+
+    for l, feature in enumerate(x):
+        in_channels = x.shape[-1]
+        for i in range(conv_num):
+            x_cls = x
+            x_cls = KL.add(name="_cls")([
+                KL.ZeroPadding2D(padding=(1, 1))(x_cls),
+                KL.Conv2D(in_channels,
+                          kernel_size=3,
+                          strides=1,
+                          padding="valid")(x_cls)
+            ])
+            x_cls = tf.contrib.layers.group_norm(x_cls, groups=32, channels_axis=-1)
+            x_cls = KL.ReLU()(x_cls)
+
+            centerness.append(x_cls)
+
+            x_cls = KL.add(name="_cls_to_logits")([
+                KL.ZeroPadding2D(padding=(1, 1))(x_cls),
+                KL.Conv2D(num_classes,
+                          kernel_size=3,
+                          strides=1,
+                          padding="valid")(x_cls)
+            ])
+            logits.append(x_cls)
+            
+
+
+
 if __name__ == "__main__":
-    # input = tf.random.normal((4, 1024, 1024, 3))
     input = tf.random.normal((4, 1024, 1024, 3))
     x = vovnet_graph(input, "vovnet", VoVNet99_eSE_FPNStagesTo5)
-
-    # print(x.shape)
-    # x = tf.random.normal((4,24,24,3))
-    # y = tf.random.normal((4,24,24,3))
-    # arr = []
-    # arr.append(x)
-    # arr.append(y)
-    # z = tf.concat(arr, -1)
-    # print(x.shape)
-    # print(y.shape)
-    # print(z.shape)
+    maps = fpn(x, VoVNet99_eSE_FPNStagesTo5)
